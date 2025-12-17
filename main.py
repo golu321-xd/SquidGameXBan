@@ -1,185 +1,187 @@
-import os, json, time, requests, threading
+import os, json, time, threading, requests
 from datetime import datetime
 from flask import Flask
 import discord
-from discord.ext import commands
+from discord import app_commands
 
 # ================= ENV =================
-DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
+TOKEN = os.getenv("DISCORD_TOKEN")
 PORT = int(os.getenv("PORT", 8080))
-OWNER_IDS = [int(x) for x in os.getenv("OWNER_IDS", "").split(",") if x]
-
-if not DISCORD_TOKEN or not OWNER_IDS:
-    raise Exception("Missing DISCORD_TOKEN or OWNER_IDS")
+OWNER_IDS = [int(x) for x in os.getenv("OWNER_IDS","").split(",") if x]
 
 # ================= FILES =================
 BLOCKED_FILE = "blocked.json"
 USERS_FILE = "users.json"
 
-# ================= LOAD / SAVE =================
-def load(file):
+def load(f):
     try:
-        with open(file, "r") as f:
-            return json.load(f)
+        with open(f,"r") as file:
+            return json.load(file)
     except:
         return {}
 
-def save(file, data):
-    with open(file, "w") as f:
-        json.dump(data, f)
+def save(f,d):
+    with open(f,"w") as file:
+        json.dump(d,file)
 
 BLOCKED = load(BLOCKED_FILE)
 USERS = load(USERS_FILE)
 WAITING = {}
 
 # ================= EMBED =================
-def make_embed(title, desc, color=0x2f3136):
-    emb = discord.Embed(
+def embed(title, desc, color=0x5865F2):
+    e = discord.Embed(
         title=title,
         description=desc,
         color=color,
         timestamp=datetime.utcnow()
     )
-    emb.set_footer(text="Ban System • Online")
-    return emb
+    e.set_footer(text="Ban System • Online")
+    return e
 
 # ================= ROBLOX =================
-def get_user_info(uid):
+def roblox(uid):
     try:
-        r = requests.get(f"https://users.roblox.com/v1/users/{uid}", timeout=5).json()
-        return r.get("name", "Unknown"), r.get("displayName", "Unknown")
+        r = requests.get(f"https://users.roblox.com/v1/users/{uid}",timeout=5).json()
+        return r.get("name","Unknown"), r.get("displayName","Unknown")
     except:
-        return "Unknown", "Unknown"
+        return "Unknown","Unknown"
 
-# ================= CLEAN TEMP =================
+# ================= CLEAN =================
 def cleanup():
-    changed = False
     for uid in list(BLOCKED.keys()):
         d = BLOCKED[uid]
         if not d["perm"] and time.time() > d["expire"]:
             del BLOCKED[uid]
-            changed = True
-    if changed:
-        save(BLOCKED_FILE, BLOCKED)
+    save(BLOCKED_FILE, BLOCKED)
 
-# ================= DISCORD BOT =================
-intents = discord.Intents.default()
-intents.message_content = True
-bot = commands.Bot(command_prefix="/", intents=intents)
+# ================= DISCORD =================
+class Bot(discord.Client):
+    def __init__(self):
+        intents = discord.Intents.default()
+        intents.message_content = True
+        super().__init__(intents=intents)
+        self.tree = app_commands.CommandTree(self)
 
-def is_owner(ctx):
-    return ctx.author.id in OWNER_IDS
+    async def setup_hook(self):
+        await self.tree.sync()
+        print("Slash commands synced")
+
+bot = Bot()
+
+def owner(interaction):
+    return interaction.user.id in OWNER_IDS
 
 @bot.event
 async def on_ready():
-    print("Discord Bot Online")
+    print("Bot Online")
 
-# ================= COMMANDS =================
-@bot.command()
-async def add(ctx, user_id: str):
-    if not is_owner(ctx): return
-    WAITING[ctx.author.id] = {"action": "add", "uid": user_id}
-    u, d = get_user_info(user_id)
-    await ctx.send(embed=make_embed(
-        "🔨 PERMANENT BAN",
-        f"**Name:** {d}\n**Username:** @{u}\n**ID:** `{user_id}`\n\n✍️ Type reason below",
-        0xff0000
-    ))
+# ================= SLASH COMMANDS =================
 
-@bot.command()
-async def tempban(ctx, user_id: str, mins: int):
-    if not is_owner(ctx): return
-    WAITING[ctx.author.id] = {"action": "temp", "uid": user_id, "mins": mins}
-    u, d = get_user_info(user_id)
-    await ctx.send(embed=make_embed(
-        "⏱ TEMP BAN",
-        f"**Name:** {d}\n**Username:** @{u}\n**ID:** `{user_id}`\n"
-        f"**Duration:** `{mins} minutes`\n\n✍️ Type reason below",
-        0xffa500
-    ))
+@bot.tree.command(name="add", description="Permanent ban user")
+async def add(interaction: discord.Interaction, user_id: str):
+    if not owner(interaction):
+        return await interaction.response.send_message("No permission", ephemeral=False)
 
-@bot.command()
-async def remove(ctx, user_id: str):
-    if not is_owner(ctx): return
+    WAITING[interaction.user.id] = {"type":"perm","uid":user_id}
+    u,d = roblox(user_id)
+
+    await interaction.response.send_message(
+        embed=embed(
+            "🔨 PERMANENT BAN",
+            f"**Name:** {d}\n**Username:** @{u}\n**ID:** `{user_id}`\n\n✍️ Type reason",
+            0xff0000
+        )
+    )
+
+@bot.tree.command(name="tempban", description="Temporary ban user")
+async def tempban(interaction: discord.Interaction, user_id: str, minutes: int):
+    if not owner(interaction):
+        return await interaction.response.send_message("No permission", ephemeral=False)
+
+    WAITING[interaction.user.id] = {
+        "type":"temp",
+        "uid":user_id,
+        "mins":minutes
+    }
+
+    u,d = roblox(user_id)
+    await interaction.response.send_message(
+        embed=embed(
+            "⏱ TEMP BAN",
+            f"**Name:** {d}\n**Username:** @{u}\n**ID:** `{user_id}`\n"
+            f"**Time:** `{minutes} minutes`\n\n✍️ Type reason",
+            0xffa500
+        )
+    )
+
+@bot.tree.command(name="unban", description="Unban user")
+async def unban(interaction: discord.Interaction, user_id: str):
+    if not owner(interaction):
+        return await interaction.response.send_message("No permission", ephemeral=False)
+
     BLOCKED.pop(user_id, None)
     save(BLOCKED_FILE, BLOCKED)
-    await ctx.send(embed=make_embed(
-        "✅ UNBANNED",
-        f"User `{user_id}` has been unbanned",
-        0x00ff00
-    ))
 
-@bot.command()
-async def list(ctx):
-    if not is_owner(ctx): return
+    await interaction.response.send_message(
+        embed=embed(
+            "✅ UNBANNED",
+            f"User `{user_id}` unbanned",
+            0x00ff00
+        )
+    )
+
+@bot.tree.command(name="list", description="Show banned users")
+async def listban(interaction: discord.Interaction):
+    if not owner(interaction):
+        return await interaction.response.send_message("No permission", ephemeral=False)
+
     cleanup()
     if not BLOCKED:
-        await ctx.send(embed=make_embed("📭 No Bans", "No users banned.", 0x00ff00))
-        return
+        return await interaction.response.send_message(
+            embed=embed("📭 No Bans","No users banned",0x00ff00)
+        )
 
-    desc = ""
-    for i, (uid, d) in enumerate(BLOCKED.items(), 1):
-        u, n = get_user_info(uid)
-        t = "PERM" if d["perm"] else f"{int((d['expire']-time.time())/60)}m left"
-        desc += f"**{i}. {n} (@{u})**\nID: `{uid}` | `{t}`\nReason: {d['msg']}\n\n"
+    txt=""
+    for i,(uid,d) in enumerate(BLOCKED.items(),1):
+        u,n = roblox(uid)
+        t="PERM" if d["perm"] else f"{int((d['expire']-time.time())/60)}m"
+        txt+=f"**{i}. {n} (@{u})**\nID:`{uid}` `{t}`\nReason:{d['msg']}\n\n"
 
-    await ctx.send(embed=make_embed("🚫 Blocked Users", desc, 0x5865F2))
+    await interaction.response.send_message(embed=embed("🚫 Blocked Users",txt))
 
-@bot.command()
-async def clear(ctx):
-    if not is_owner(ctx): return
-    BLOCKED.clear()
-    save(BLOCKED_FILE, BLOCKED)
-    await ctx.send(embed=make_embed("🧹 Cleared", "All bans cleared.", 0xff4444))
-
-@bot.command()
-async def users(ctx):
-    if not is_owner(ctx): return
-    if not USERS:
-        await ctx.send(embed=make_embed("No Users", "No script users tracked."))
-        return
-    desc = ""
-    for i, (uid, info) in enumerate(USERS.items(), 1):
-        t = datetime.fromtimestamp(info["time"]).strftime("%d %b %I:%M %p")
-        desc += f"**{i}. {info['display']} (@{info['username']})**\nTime: {t}\n\n"
-    await ctx.send(embed=make_embed("👥 Script Users", desc))
-
+# ================= REASON INPUT =================
 @bot.event
 async def on_message(msg):
     if msg.author.id in WAITING:
-        data = WAITING[msg.author.id]
-        uid = data["uid"]
+        d = WAITING[msg.author.id]
+        uid = d["uid"]
         reason = msg.content
 
-        if data["action"] == "add":
-            BLOCKED[uid] = {"perm": True, "msg": reason}
-            title, color = "✅ PERM BAN ADDED", 0xff0000
+        if d["type"]=="perm":
+            BLOCKED[uid]={"perm":True,"msg":reason}
+            title="✅ PERM BAN ADDED"
+            color=0xff0000
         else:
-            BLOCKED[uid] = {
-                "perm": False,
-                "msg": reason,
-                "expire": time.time() + data["mins"] * 60
+            BLOCKED[uid]={
+                "perm":False,
+                "msg":reason,
+                "expire":time.time()+d["mins"]*60
             }
-            title, color = "✅ TEMP BAN ADDED", 0xffa500
+            title="✅ TEMP BAN ADDED"
+            color=0xffa500
 
         save(BLOCKED_FILE, BLOCKED)
         del WAITING[msg.author.id]
 
-        await msg.channel.send(embed=make_embed(
+        await msg.channel.send(embed=embed(
             title,
             f"**User ID:** `{uid}`\n**Reason:** {reason}",
             color
         ))
-        return
-
-    await bot.process_commands(msg)
 
 # ================= FLASK =================
 app = Flask(__name__)
-
-@app.route("/")
-def home():
-    return "Bot Alive"
 
 @app.route("/ping")
 def ping():
@@ -189,13 +191,13 @@ def ping():
 def check(uid):
     cleanup()
     d = BLOCKED.get(uid)
-    if d and (d["perm"] or time.time() < d.get("expire", 0)):
+    if d and (d["perm"] or time.time()<d.get("expire",0)):
         return "true"
     return "false"
 
 @app.route("/track/<uid>/<username>/<display>")
-def track(uid, username, display):
-    USERS[uid] = {"username": username, "display": display, "time": time.time()}
+def track(uid,username,display):
+    USERS[uid]={"username":username,"display":display,"time":time.time()}
     save(USERS_FILE, USERS)
     return "OK"
 
@@ -203,10 +205,10 @@ def track(uid, username, display):
 def reason(uid):
     cleanup()
     d = BLOCKED.get(uid)
-    return d.get("msg", "") if d else ""
+    return d.get("msg","") if d else ""
 
 def run_flask():
     app.run(host="0.0.0.0", port=PORT)
 
 threading.Thread(target=run_flask).start()
-bot.run(DISCORD_TOKEN)
+bot.run(TOKEN)
